@@ -1,300 +1,457 @@
-# 飞书消息监听 & AI 分类
+# 飞书智能周报工具
 
-基于飞书开放平台和飞书内置 AI 的群聊消息监听、智能分类与每日摘要报告工具。
+> 自动获取飞书日历事件和任务列表，调用 AI 生成正式周报，一键创建飞书文档并推送到群聊。
 
-## 功能特性
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+
+---
+
+## 目录
+
+- [功能介绍](#功能介绍)
+- [工作流程](#工作流程)
+- [环境要求](#环境要求)
+- [安装步骤](#安装步骤)
+- [快速开始](#快速开始)
+- [命令行参数](#命令行参数)
+- [配置文件](#配置文件)
+- [使用示例](#使用示例)
+- [输出说明](#输出说明)
+- [定时任务](#定时任务)
+- [常见问题](#常见问题)
+
+---
+
+## 功能介绍
 
 | 功能 | 说明 |
 |------|------|
-| 消息监听 | 通过 lark-cli 实时监听飞书群聊消息（im.message.receive_v1 事件） |
-| AI 智能分类 | 使用飞书内置 AI（spark-lite）对消息进行 P0-P3 优先级分类 |
-| FAQ 自动回复 | 支持关键词精确匹配和 Jaccard 模糊匹配两种模式 |
-| 每日摘要报告 | 定时生成 Markdown 格式的摘要报告，自动创建飞书云文档 |
-| 消息过滤 | 支持按 chat_id 白名单过滤，自动忽略机器人消息 |
-| 线程安全存储 | 消息存储支持多线程并发，跨天自动清空 |
-| 日志管理 | RotatingFileHandler 自动轮转，控制台+文件双输出 |
+| 📅 日历事件获取 | 自动获取本周（周一至周日）的飞书日历事件 |
+| ✅ 任务列表获取 | 获取当前飞书待办任务列表 |
+| 🤖 AI 周报生成 | 调用火山方舟（豆包大模型）生成正式周报 |
+| 📝 飞书文档创建 | 将周报自动发布为飞书云文档 |
+| 💬 群聊推送 | 将周报发送到指定飞书群聊或用户 |
+| 🔍 数据过滤 | 按关键词/组织者过滤日历事件和任务 |
+| 📋 预览模式 | dry-run 预览过滤后的数据，不调用 AI |
+| 📝 自定义模板 | 支持自定义 Prompt 模板文件 |
+| 📊 日志系统 | 支持 DEBUG 详细日志和日志文件输出 |
 
-## 项目结构
+---
+
+## 工作流程
 
 ```
-.
-├── listen_feishu.py    # 主脚本（消息监听、AI分类、FAQ匹配、报告生成）
-├── config.yaml         # 配置文件
-├── faq.yaml            # FAQ 知识库
-├── create_doc.py       # 飞书云文档创建脚本
-├── README.md           # 使用文档
-├── .gitignore          # Git 忽略规则
-└── listen_feishu.log   # 运行日志（自动生成）
+获取本周日历事件 + 任务列表
+        │
+        ▼
+   应用排除规则过滤
+        │
+        ▼
+  提取关键信息 → 构建 Prompt → 调用 AI 生成周报
+        │
+        ├──▶ 创建飞书云文档
+        ├──▶ 推送到群聊/用户
+        └──▶ 保存本地文件（JSON + Markdown）
 ```
+
+---
 
 ## 环境要求
 
 | 依赖 | 版本要求 | 说明 |
-|------|----------|------|
-| Python | >= 3.10 | 使用了 `dict \| None`、`list[dict]` 等类型注解 |
-| PyYAML | >= 6.0 | 配置文件解析 |
-| lark-cli | 最新版 | 飞书命令行工具，需提前安装并登录 |
+|------|---------|------|
+| Python | >= 3.10 | 使用了 `tuple[str, str]` 等类型语法 |
+| lark-cli | 最新版 | 飞书命令行工具 |
+| 火山方舟 API Key | — | 用于 AI 周报生成（豆包大模型） |
+
+> 脚本零外部依赖，仅使用 Python 标准库（`urllib`、`logging`、`subprocess` 等）。
+
+---
+
+## 安装步骤
+
+### 1. 克隆项目
+
+```bash
+git clone https://github.com/peachgreenti/lark-cli-skill-weekly-report.git
+cd lark-cli-skill-weekly-report
+```
+
+### 2. 安装 lark-cli
+
+```bash
+npm install -g @larksuite/cli
+npx skills add larksuite/cli -y -g
+
+# 配置并登录
+lark-cli config init
+lark-cli auth login --recommend
+```
+
+### 3. 配置火山方舟 API
+
+1. 打开 [火山方舟控制台](https://console.volcengine.com/ark)
+2. 创建 **推理接入点**（推荐模型：`Doubao-1.5-pro`），获取接入点 ID（`ep-xxxxxxxx`）
+3. 在 [API Key 管理](https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey) 创建 API Key
+
+### 4. 配置项目
+
+```bash
+# 复制示例配置文件
+cp config.example.json config.json
+
+# 编辑配置，填入你的 API Key 和接入点 ID
+vim config.json
+```
+
+### 5. 验证
+
+```bash
+python3 feishu_weekly.py --help
+python3 feishu_weekly.py --dry-run
+```
+
+---
 
 ## 快速开始
 
-### 第 1 步：安装 lark-cli
-
 ```bash
-# 安装飞书命令行工具
-npm install -g @larksuiteoapi/lark-cli
+# 完整运行：获取数据 → AI 生成周报 → 创建飞书文档 → 推送群聊
+python3 feishu_weekly.py
 
-# 登录飞书账号
-lark-cli login
+# 仅预览数据（不调用 AI）
+python3 feishu_weekly.py --dry-run
+
+# 预览 + 详细日志
+python3 feishu_weekly.py --dry-run -v
+
+# 生成周报但不创建文档、不推送
+python3 feishu_weekly.py --no-doc --no-notify
+
+# 指定推送目标
+python3 feishu_weekly.py --send-to oc_xxxxxxxxxxxxxxxx
+
+# 使用自定义 Prompt 模板
+python3 feishu_weekly.py --template my_prompt.md
 ```
 
-### 第 2 步：安装 Python 依赖
+---
 
-```bash
-pip install pyyaml
+## 命令行参数
+
+```
+usage: feishu_weekly.py [-h] [--no-ai] [--no-doc] [--no-notify] [--dry-run]
+                        [--send-to SEND_TO] [--template TEMPLATE]
+                        [--config CONFIG] [--docs-mode {arg,file,stdin}]
+                        [-v] [--log-file LOG_FILE]
 ```
 
-### 第 3 步：下载项目文件
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--no-ai` | 仅获取数据，不调用 AI 生成周报 | 关闭 |
+| `--no-doc` | 不自动创建飞书文档 | 关闭 |
+| `--no-notify` | 不发送消息到群聊 | 关闭 |
+| `--dry-run` | 预览模式：仅获取和过滤数据 | 关闭 |
+| `--send-to` | 指定推送目标（`oc_xxx` 群聊 / `ou_xxx` 用户） | 配置文件 |
+| `--template` | 自定义 Prompt 模板文件路径 | 内置模板 |
+| `--config` | 指定配置文件路径 | `./config.json` |
+| `--docs-mode` | 文档创建模式：`arg` / `file` / `stdin` | `file` |
+| `-v, --verbose` | 详细日志输出（DEBUG 级别） | INFO |
+| `--log-file` | 日志输出到文件 | 无 |
 
-```bash
-git clone <your-repo-url>
-cd listen_feishu
-```
+---
 
-### 第 4 步：编辑配置文件
+## 配置文件
 
-```bash
-# 根据实际需求修改配置
-vim config.yaml
-```
+配置文件 `config.json` 支持以下配置项（也可参考 [config.example.json](config.example.json)）：
 
-### 第 5 步：（可选）配置 FAQ 知识库
-
-```bash
-# 编辑 FAQ 文件，添加常见问题和回复
-vim faq.yaml
-
-# 在 config.yaml 中启用 FAQ
-# faq:
-#   enabled: true
-```
-
-### 第 6 步：启动监听
-
-```bash
-# 使用默认配置文件
-python listen_feishu.py
-
-# 指定配置文件
-python listen_feishu.py --config /path/to/config.yaml
-```
-
-## 配置文件详解
-
-### listener - 监听器配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `event_name` | string | `im.message.receive_v1` | 飞书事件名称（固定值） |
-| `output_format` | string | `ndjson` | 输出格式，目前仅支持 ndjson |
-| `allowed_chat_ids` | list | `[]` | 允许处理的 chat_id 白名单，为空则处理所有 |
-| `ignore_bot_messages` | bool | `true` | 是否忽略机器人自身发送的消息 |
-
-### ai - AI 分类配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `model` | string | `spark-lite` | 飞书内置 AI 模型名称 |
-| `timeout` | int | `30` | AI 调用超时时间（秒） |
-| `enabled` | bool | `true` | 是否启用 AI 分类 |
-| `classification_prompt` | string | （见默认配置） | AI 分类 Prompt，需包含 `{message}` 占位符 |
-
-### faq - FAQ 自动回复配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | `false` | 是否启用 FAQ 自动回复 |
-| `file_path` | string | `faq.yaml` | FAQ 知识库文件路径 |
-| `match_mode` | string | `keyword` | 匹配模式：`keyword` 或 `fuzzy` |
-| `fuzzy_threshold` | float | `0.6` | 模糊匹配阈值（0-1，越大越严格） |
-
-### report - 每日摘要报告配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用每日摘要报告 |
-| `hour` | int | `18` | 报告生成时间（小时，24小时制） |
-| `minute` | int | `0` | 报告生成时间（分钟） |
-| `title_prefix` | string | `飞书消息每日摘要` | 飞书云文档标题前缀 |
-| `clear_after_report` | bool | `true` | 报告生成后是否清空当日消息 |
-| `create_timeout` | int | `60` | 创建飞书文档超时时间（秒） |
-
-### logging - 日志配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `level` | string | `INFO` | 日志级别：DEBUG/INFO/WARNING/ERROR/CRITICAL |
-| `file_path` | string | `listen_feishu.log` | 日志文件路径 |
-| `max_size_mb` | int | `10` | 单个日志文件最大大小（MB） |
-| `backup_count` | int | `5` | 保留的日志备份文件数量 |
-| `format` | string | （见默认配置） | 日志格式字符串 |
-
-## FAQ 格式说明
-
-FAQ 知识库使用 YAML 格式，每条 FAQ 包含以下字段：
-
-```yaml
-faqs:
-  - keywords:          # 关键词列表（用于 keyword 模式匹配）
-      - "关键词1"
-      - "关键词2"
-    question: "问题描述"  # 问题描述（用于 fuzzy 模式匹配及展示）
-    answer: |            # 回复内容（支持多行）
-      回复内容第一行
-      回复内容第二行
-```
-
-### 匹配模式
-
-- **keyword（关键词匹配）**：消息中包含任一 FAQ 的任一关键词即命中，速度快、精度高
-- **fuzzy（模糊匹配）**：使用 Jaccard 相似度计算消息与 FAQ 的匹配度，需超过阈值才命中
-
-## AI 优先级定义
-
-| 优先级 | 级别 | 说明 |
-|--------|------|------|
-| **P0** | 紧急 | 生产环境故障、线上事故、核心服务不可用、数据丢失、安全事件 |
-| **P1** | 重要 | 客户反馈的严重问题、即将到期的关键任务、重要会议通知 |
-| **P2** | 一般 | 日常开发讨论、代码审查请求、一般性技术问题、团队协作沟通 |
-| **P3** | 低优 | 闲聊、表情包、非工作相关话题、已解决问题的后续讨论 |
-
-AI 分类返回的 JSON 格式：
+### AI 配置
 
 ```json
 {
-  "priority": "P0",
-  "reason": "分类理由（一句话）",
-  "category": "消息类别"
+  "ai": {
+    "model": "ep-20260418212629-26ftq",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "api_key": "ark-xxxxxxxx",
+    "temperature": 0.3,
+    "max_tokens": 4096
+  }
 }
 ```
 
-## 每日摘要报告
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `model` | 火山方舟接入点 ID | `doubao-1-5-pro-256k` |
+| `base_url` | API 基础 URL | `https://ark.cn-beijing.volces.com/api/v3` |
+| `api_key` | API Key（也可用 `ARK_API_KEY` 环境变量） | — |
+| `temperature` | 生成温度（0-1，越低越确定性） | `0.3` |
+| `max_tokens` | 最大输出 Token 数 | `4096` |
 
-每日在指定时间自动生成摘要报告，包含以下内容：
+### 周报配置
 
-1. **统计概览**：消息总数、各优先级分布
-2. **优先级详情**：按 P0-P3 分组展示每条消息的时间、发送者、内容和分类理由
-3. **未分类消息**：AI 分类失败的消息列表
-4. **自动创建飞书云文档**：报告以 Markdown 格式写入飞书云文档，方便团队查看
+```json
+{
+  "report": {
+    "title_pattern": "周报 ({start} ~ {end})",
+    "custom_prompt": ""
+  }
+}
+```
 
-报告标题格式：`{title_prefix} (YYYY-MM-DD)`
+| 字段 | 说明 |
+|------|------|
+| `title_pattern` | 文档标题格式，支持 `{start}` `{end}` 占位符 |
+| `custom_prompt` | 自定义 Prompt 模板（留空用内置模板），支持 `{start_date}` `{end_date}` `{calendar_events}` `{tasks}` 占位符 |
+
+### 推送配置
+
+```json
+{
+  "notify": {
+    "chat_id": "",
+    "user_id": "",
+    "send_as": "user"
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `chat_id` | 飞书群聊 ID（`oc_xxx`），与 `user_id` 二选一 |
+| `user_id` | 飞书用户 ID（`ou_xxx`），与 `chat_id` 二选一 |
+| `send_as` | 发送身份：`user`（以用户身份）或 `bot`（以机器人身份） |
+
+### 排除规则
+
+```json
+{
+  "exclude": {
+    "calendar_keywords": ["午休", "站会"],
+    "calendar_organizers": [],
+    "task_keywords": ["打卡", "考勤"],
+    "hide_completed_tasks": true
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `calendar_keywords` | 排除包含这些关键词的日历事件（支持通配符 `*`） |
+| `calendar_organizers` | 排除这些组织者的事件 |
+| `task_keywords` | 排除包含这些关键词的任务 |
+| `hide_completed_tasks` | 是否隐藏已完成的任务 |
+
+### 文档创建配置
+
+```json
+{
+  "docs": {
+    "mode": "file"
+  }
+}
+```
+
+| 模式 | 说明 |
+|------|------|
+| `arg` | 通过命令行参数传入 `--markdown "内容"` |
+| `file` | 通过文件传入 `--markdown @file.md`（默认，推荐） |
+| `stdin` | 通过管道传入 `echo "内容" \| --markdown -` |
+
+### 配置优先级
+
+```
+命令行参数 > 环境变量 > config.json > 内置默认值
+```
+
+---
+
+## 使用示例
+
+### 示例 1：基础使用
+
+```bash
+# 首次运行，预览数据
+python3 feishu_weekly.py --dry-run -v
+
+# 确认数据无误后，完整运行
+python3 feishu_weekly.py
+```
+
+### 示例 2：过滤无关数据
+
+在 `config.json` 中配置排除规则：
+
+```json
+{
+  "exclude": {
+    "calendar_keywords": ["午休", "1:1", "站会"],
+    "task_keywords": ["打卡", "考勤", "日报"],
+    "hide_completed_tasks": true
+  }
+}
+```
+
+### 示例 3：推送到群聊
+
+```bash
+# 命令行指定
+python3 feishu_weekly.py --send-to oc_xxxxxxxxxxxxxxxx
+
+# 或在 config.json 中配置
+```
+
+### 示例 4：自定义 Prompt 模板
+
+创建 `my_prompt.md`：
+
+```markdown
+你是一位技术团队的周报助手。请根据以下数据生成简洁的技术周报。
+
+## 时间范围
+{start_date} ~ {end_date}
+
+## 本周日历事件
+{calendar_events}
+
+## 待办任务
+{tasks}
+
+请输出：
+1. 本周完成事项
+2. 进行中的工作
+3. 下周计划
+```
+
+```bash
+python3 feishu_weekly.py --template my_prompt.md
+```
+
+### 示例 5：定时自动运行
+
+```bash
+# 每周五下午 6 点自动生成周报并推送
+0 18 * * 5 cd /path/to/project && python3 feishu_weekly.py --log-file weekly.log
+```
+
+---
+
+## 输出说明
+
+运行完成后，会在当前目录生成以下文件：
+
+| 文件 | 格式 | 内容 |
+|------|------|------|
+| `feishu_weekly_YYYY-MM-DD_YYYY-MM-DD.json` | JSON | 完整数据（日历事件 + 任务 + 周报 + 文档链接） |
+| `weekly_report_YYYY-MM-DD_YYYY-MM-DD.md` | Markdown | AI 生成的周报（独立文件） |
+
+### JSON 输出结构
+
+```json
+{
+  "week_range": {
+    "start": "2026-04-13",
+    "end": "2026-04-19"
+  },
+  "calendar_events": { "ok": true, "data": [...] },
+  "tasks": { "ok": true, "data": { "items": [...] } },
+  "weekly_report": "# 周报\n\n...",
+  "feishu_doc": "https://xxx.feishu.cn/docx/xxx",
+  "fetched_at": "2026-04-18T10:30:00"
+}
+```
+
+---
+
+## 日志系统
+
+```bash
+# 普通日志（INFO 级别）
+python3 feishu_weekly.py
+
+# 详细日志（DEBUG 级别，显示命令详情和过滤明细）
+python3 feishu_weekly.py -v
+
+# 日志同时输出到文件
+python3 feishu_weekly.py --log-file weekly.log
+```
+
+日志输出示例：
+
+```
+22:16:51 INFO  已加载配置文件: ./config.json
+22:16:51 INFO  本周范围: 2026-04-13 ~ 2026-04-19
+22:16:51 INFO  正在获取日历事件 (2026-04-13 ~ 2026-04-19)...
+22:16:55 INFO  正在获取任务列表...
+22:17:00 INFO  任务列表: 原始 6 条 → 过滤后 2 条（排除 4 条）
+22:17:00 INFO  正在调用 AI (ep-20260418212629-26ftq) 生成周报...
+22:17:05 INFO  AI 周报生成成功（1234 字符）
+22:17:06 INFO  正在创建飞书文档: 周报 (2026-04-13 ~ 2026-04-19) (模式: file)
+22:17:08 INFO  飞书文档创建成功
+22:17:08 INFO  结果已保存到: feishu_weekly_2026-04-13_2026-04-19.json
+22:17:08 INFO  全部完成 ✓
+```
+
+---
 
 ## 所需权限
 
-使用本工具需要以下飞书应用权限：
-
 | 权限 | 说明 |
 |------|------|
-| `im:message` | 接收群聊消息 |
-| `im:message:readonly` | 读取消息内容 |
-| `ai:chat` | 调用飞书内置 AI |
+| `calendar:calendar:read` | 读取日历事件 |
+| `task:task:read` | 读取任务列表 |
 | `docx:document:create` | 创建飞书云文档 |
+| `im:message.send_as_user` | 以用户身份发送消息（可选） |
 
-请确保 lark-cli 登录的账号拥有以上权限。
+登录时使用推荐权限即可覆盖：
 
-## 日志示例
-
+```bash
+lark-cli auth login --recommend
 ```
-2026-04-18 09:00:01 [INFO] listen_feishu - 配置已加载: config.yaml
-2026-04-18 09:00:01 [INFO] listen_feishu - 日志已初始化: level=INFO, file=listen_feishu.log
-2026-04-18 09:00:01 [INFO] listen_feishu - 报告调度器已启动，每日 18:00 生成摘要
-2026-04-18 09:00:01 [INFO] listen_feishu - 启动事件监听: lark-cli event subscribe --event im.message.receive_v1 --output ndjson
-2026-04-18 09:00:05 [INFO] listen_feishu - 收到消息 [2026-04-18 09:00:05] ou_xxxx: 生产环境数据库连接超时
-2026-04-18 09:00:06 [INFO] listen_feishu - AI 分类: P0 紧急 - 生产环境数据库连接超时属于线上事故
-2026-04-18 09:00:10 [INFO] listen_feishu - 收到消息 [2026-04-18 09:00:10] ou_xxxx: 今天中午吃什么
-2026-04-18 09:00:11 [INFO] listen_feishu - AI 分类: P3 低优 - 非工作相关的闲聊话题
-```
+
+---
 
 ## 常见问题
 
-### Q1: 启动报错 "未找到 lark-cli 命令"
-
-**A**: 请确保 lark-cli 已正确安装并添加到系统 PATH 中。可以通过以下命令验证：
+### Q: 运行报错 `command not found: lark-cli`
 
 ```bash
+which lark-cli
 lark-cli --version
 ```
 
-如果未安装，请执行 `npm install -g @larksuiteoapi/lark-cli`。
+### Q: AI 报错 `HTTP 401`
 
-### Q2: AI 分类返回 P3 或分类失败
+API Key 无效或过期，请检查 `config.json` 中的 `ai.api_key` 或环境变量 `ARK_API_KEY`。
 
-**A**: 可能原因：
-- AI 模型调用超时，可尝试增大 `ai.timeout` 值
-- 检查 `classification_prompt` 是否包含 `{message}` 占位符
-- 确认 lark-cli 登录的账号有 AI 接口调用权限
+### Q: AI 报错 `HTTP 404` 模型不存在
 
-### Q3: 每日摘要报告未生成
+需要使用火山方舟的 **接入点 ID**（`ep-xxxxxxxx` 格式），而非模型名称。请到[火山方舟控制台](https://console.volcengine.com/ark/region:ark+cn-beijing/model)创建接入点。
 
-**A**: 检查以下配置：
-- `report.enabled` 是否为 `true`
-- `report.hour` 和 `report.minute` 是否设置正确
-- 确认 lark-cli 有创建云文档的权限
-- 查看日志中是否有 "创建飞书文档失败" 的错误信息
+### Q: 文档创建失败
 
-### Q4: 如何只监听特定群聊？
+尝试切换文档创建模式：
 
-**A**: 在 `config.yaml` 中配置 `listener.allowed_chat_ids`，填入目标群聊的 chat_id：
-
-```yaml
-listener:
-  allowed_chat_ids:
-    - "oc_xxxxxxxxxxxxxxxx"
-    - "oc_yyyyyyyyyyyyyyyy"
+```bash
+python3 feishu_weekly.py --docs-mode stdin
 ```
 
-### Q5: FAQ 匹配不准确怎么办？
+### Q: 消息推送失败
 
-**A**: 优化建议：
-- 使用 `keyword` 模式时，添加更多同义词关键词
-- 使用 `fuzzy` 模式时，调整 `fuzzy_threshold`（降低阈值可提高召回率）
-- 在 `question` 字段中包含更详细的描述性文本
+确认已授权 `im:message.send_as_user` 权限：
 
-## 技术架构
-
+```bash
+lark-cli auth login --scope "im:message.send_as_user"
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    listen_feishu.py                      │
-│                                                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐   │
-│  │ lark-cli │───>│ 消息解析  │───>│   消息过滤器      │   │
-│  │  event   │    │          │    │ (chat_id/机器人)  │   │
-│  │ subscribe│    └──────────┘    └────────┬─────────┘   │
-│  └──────────┘                              │             │
-│                                     ┌──────▼──────┐     │
-│                                     │ FAQ 匹配器   │     │
-│                                     │(keyword/    │     │
-│                                     │ fuzzy)      │     │
-│                                     └──────┬──────┘     │
-│                                            │             │
-│                                     ┌──────▼──────┐     │
-│                                     │ AI 分类器    │     │
-│                                     │(spark-lite) │     │
-│                                     └──────┬──────┘     │
-│                                            │             │
-│                                     ┌──────▼──────┐     │
-│                                     │ 消息存储     │     │
-│                                     │(线程安全)    │     │
-│                                     └──────┬──────┘     │
-│                                            │             │
-│  ┌──────────────────┐             ┌──────▼──────┐     │
-│  │ 报告调度器        │<────────────│ 定时触发     │     │
-│  │ (daemon 线程)    │             └─────────────┘     │
-│  │  └─> lark-cli   │                                  │
-│  │     docs +create │                                  │
-│  └──────────────────┘                                  │
-│                                                         │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │ 日志系统 (RotatingFileHandler + Console)          │  │
-│  └──────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+
+### Q: 如何只获取数据不生成周报？
+
+```bash
+python3 feishu_weekly.py --no-ai
 ```
+
+---
+
+## License
+
+MIT
