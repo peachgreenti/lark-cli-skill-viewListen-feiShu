@@ -1,0 +1,41 @@
+{
+  "_comment": "飞书智能周报工具配置文件",
+
+  "ai": {
+    "model": "ep-20260418212629-26ftq",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "temperature": 0.3,
+    "max_tokens": 4096
+  },
+
+  "report": {
+    "title_pattern": "周报 ({start} ~ {end})",
+    "custom_prompt": "",
+    "_custom_prompt_comment": "留空使用内置模板，填写后替换内置模板（支持 {start_date} {end_date} {calendar_events} {tasks} 占位符）"
+  },
+
+  "notify": {
+    "chat_id": "",
+    "_chat_id_comment": "飞书群聊 ID（如 oc_xxxxxxxx），留空则不发送消息",
+    "user_id": "",
+    "_user_id_comment": "飞书用户 ID（如 ou_xxxxxxxx），与 chat_id 二选一",
+    "send_as": "user",
+    "_send_as_comment": "发送身份：user（以用户身份）或 bot（以机器人身份）"
+  },
+
+  "exclude": {
+    "calendar_keywords": [],
+    "_calendar_keywords_comment": "排除包含这些关键词的日历事件（如 ['午休', '站会']）",
+    "calendar_organizers": [],
+    "_calendar_organizers_comment": "排除这些组织者的事件（如 ['张三']）",
+    "task_keywords": [],
+    "_task_keywords_comment": "排除包含这些关键词的任务",
+    "hide_completed_tasks": false,
+    "_hide_completed_tasks_comment": "是否隐藏已完成的任务"
+  },
+
+  "docs": {
+    "mode": "file",
+    "_mode_comment": "文档创建模式：arg | file | stdin"
+  }
+}

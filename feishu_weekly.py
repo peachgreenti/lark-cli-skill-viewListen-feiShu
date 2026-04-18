@@ -3,32 +3,70 @@
 飞书本周日历事件与任务列表获取脚本（含 AI 周报生成 & 自动创建飞书文档）
 通过调用 lark-cli 获取本周的日历事件和任务列表，
 组装为 Prompt 调用火山方舟 AI 生成正式周报，
-并自动创建飞书文档，输出为 Markdown + JSON 格式。
+并自动创建飞书文档、推送到群聊，输出为 Markdown + JSON 格式。
 """
 
 import argparse
+import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 # ============================================================
-# 配置区域
+# 配置文件加载
 # ============================================================
 
-# 火山方舟 AI 配置（OpenAI 兼容 API）
-# 也可通过环境变量 ARK_API_KEY / ARK_BASE_URL / ARK_MODEL 覆盖
-ARK_API_KEY = os.environ.get("ARK_API_KEY", "")
-ARK_BASE_URL = os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
-ARK_MODEL = os.environ.get("ARK_MODEL", "doubao-1-5-pro-256k")
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
-# 飞书文档创建命令
-DOCS_CREATE_COMMAND = ["lark-cli", "docs", "+create"]
-DOCS_CREATE_MODE = "file"  # 可选: "arg" | "file" | "stdin"
+
+def load_config(config_path: str | None = None) -> dict:
+    """
+    加载配置文件，合并环境变量。
+    优先级：环境变量 > 配置文件 > 默认值
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+    config = {}
+
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            print(f"⚙️  已加载配置文件: {path}")
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"[警告] 配置文件加载失败: {e}，使用默认配置", file=sys.stderr)
+
+    # 环境变量覆盖（最高优先级）
+    env_overrides = {
+        "ai.model": os.environ.get("ARK_MODEL"),
+        "ai.base_url": os.environ.get("ARK_BASE_URL"),
+        "ai.api_key": os.environ.get("ARK_API_KEY"),
+    }
+    for key, val in env_overrides.items():
+        if val:
+            section, field = key.split(".", 1)
+            config.setdefault(section, {})[field] = val
+
+    return config
+
+
+def get_config_value(config: dict, key_path: str, default=None):
+    """从嵌套字典中获取配置值，如 get_config_value(config, 'ai.model', 'default')。"""
+    keys = key_path.split(".")
+    val = config
+    for k in keys:
+        if isinstance(val, dict):
+            val = val.get(k)
+        else:
+            return default
+        if val is None:
+            return default
+    return val
 
 
 # ============================================================
@@ -88,6 +126,102 @@ def fetch_tasks() -> dict | list:
 
 
 # ============================================================
+# 排除规则过滤
+# ============================================================
+
+def should_exclude(text: str, keywords: list[str]) -> bool:
+    """检查文本是否匹配任一排除关键词（支持通配符 *）。"""
+    if not keywords or not text:
+        return False
+    for kw in keywords:
+        kw = kw.strip()
+        if not kw:
+            continue
+        if "*" in kw or "?" in kw:
+            if fnmatch.fnmatch(text, kw):
+                return True
+        elif kw.lower() in text.lower():
+            return True
+    return False
+
+
+def filter_calendar_events(raw: dict | list, config: dict) -> dict | list:
+    """根据排除规则过滤日历事件。"""
+    keywords = get_config_value(config, "exclude.calendar_keywords", [])
+    organizers = get_config_value(config, "exclude.calendar_organizers", [])
+
+    if not keywords and not organizers:
+        return raw
+
+    events = raw.get("data", []) if isinstance(raw, dict) else raw
+    if not isinstance(events, list):
+        return raw
+
+    filtered = []
+    excluded_count = 0
+    for ev in events:
+        summary = ev.get("summary", "")
+        organizer = ev.get("event_organizer", {}).get("display_name", "")
+
+        if should_exclude(summary, keywords):
+            excluded_count += 1
+            print(f"  🔕 排除事件: {summary}")
+            continue
+        if should_exclude(organizer, organizers):
+            excluded_count += 1
+            print(f"  🔕 排除事件（组织者）: {summary} (by {organizer})")
+            continue
+        filtered.append(ev)
+
+    if excluded_count > 0:
+        print(f"  📊 日历事件: 原始 {len(events)} 条 → 过滤后 {len(filtered)} 条（排除 {excluded_count} 条）")
+
+    result = dict(raw) if isinstance(raw, dict) else {"data": events}
+    if isinstance(raw, dict):
+        result["data"] = filtered
+        if "meta" in result and isinstance(result["meta"], dict):
+            result["meta"]["count"] = len(filtered)
+    return result
+
+
+def filter_tasks(raw: dict | list, config: dict) -> dict | list:
+    """根据排除规则过滤任务列表。"""
+    keywords = get_config_value(config, "exclude.task_keywords", [])
+    hide_completed = get_config_value(config, "exclude.hide_completed_tasks", False)
+
+    if not keywords and not hide_completed:
+        return raw
+
+    data = raw.get("data", {}) if isinstance(raw, dict) else {}
+    items = data.get("items", []) if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return raw
+
+    filtered = []
+    excluded_count = 0
+    for task in items:
+        summary = task.get("summary", "")
+        completed = task.get("completed", False)
+
+        if completed and hide_completed:
+            excluded_count += 1
+            continue
+        if should_exclude(summary, keywords):
+            excluded_count += 1
+            print(f"  🔕 排除任务: {summary}")
+            continue
+        filtered.append(task)
+
+    if excluded_count > 0:
+        print(f"  📊 任务列表: 原始 {len(items)} 条 → 过滤后 {len(filtered)} 条（排除 {excluded_count} 条）")
+
+    result = dict(raw) if isinstance(raw, dict) else {"data": {"items": items}}
+    if isinstance(raw, dict) and isinstance(result.get("data"), dict):
+        result["data"]["items"] = filtered
+    return result
+
+
+# ============================================================
 # 数据提取 — 从原始 JSON 中提取关键信息，构建结构化 Prompt
 # ============================================================
 
@@ -117,7 +251,6 @@ def extract_calendar_info(raw: dict | list) -> str:
             if meeting_url:
                 lines.append(f"  会议链接: {meeting_url}")
             if desc:
-                # 截取描述前 200 字符，避免 Prompt 过长
                 desc_short = desc[:200] + ("..." if len(desc) > 200 else "")
                 lines.append(f"  描述: {desc_short}")
             lines.append("")
@@ -138,14 +271,10 @@ def extract_tasks_info(raw: dict | list) -> str:
         for task in items:
             summary = task.get("summary", "无标题")
             due_at = task.get("due_at", "")
-            created_at = task.get("created_at", "")
-            url = task.get("url", "")
 
-            # 判断是否过期
             status = ""
             if due_at:
                 try:
-                    from datetime import timezone
                     due_dt = datetime.fromisoformat(due_at)
                     now_dt = datetime.now(timezone.utc).astimezone(due_dt.tzinfo)
                     if due_dt < now_dt:
@@ -163,10 +292,10 @@ def extract_tasks_info(raw: dict | list) -> str:
 
 
 # ============================================================
-# Prompt 构建 & AI 调用（火山方舟 OpenAI 兼容 API）
+# Prompt 构建 & AI 调用
 # ============================================================
 
-WEEKLY_REPORT_PROMPT_TEMPLATE = """你是一位专业的职场助手。请根据以下本周工作数据，生成一份正式周报。
+BUILTIN_PROMPT_TEMPLATE = """你是一位专业的职场助手。请根据以下本周工作数据，生成一份正式周报。
 
 ## 时间范围
 {start_date} ~ {end_date}
@@ -210,53 +339,63 @@ def build_weekly_prompt(
     end_date: str,
     calendar_events: dict | list,
     tasks: dict | list,
+    config: dict,
 ) -> str:
     """将日历事件和任务数据提取为结构化信息，组装为 Prompt。"""
     calendar_info = extract_calendar_info(calendar_events)
     tasks_info = extract_tasks_info(tasks)
 
-    return WEEKLY_REPORT_PROMPT_TEMPLATE.format(
+    # 优先使用自定义 Prompt 模板
+    custom_prompt = get_config_value(config, "report.custom_prompt", "")
+    template = custom_prompt.strip() if custom_prompt else BUILTIN_PROMPT_TEMPLATE
+
+    return template.format(
         start_date=start_date,
         end_date=end_date,
+        start=start_date,
+        end=end_date,
         calendar_events=calendar_info,
         tasks=tasks_info,
     )
 
 
-def call_ai(prompt: str) -> str:
+def call_ai(prompt: str, config: dict) -> str:
     """调用火山方舟 AI（OpenAI 兼容 API）生成周报。"""
-    if not ARK_API_KEY:
-        print("[错误] 未配置 ARK_API_KEY。请设置环境变量后重试：", file=sys.stderr)
-        print("  export ARK_API_KEY='your-api-key'", file=sys.stderr)
+    api_key = get_config_value(config, "ai.api_key", "")
+    base_url = get_config_value(config, "ai.base_url", "https://ark.cn-beijing.volces.com/api/v3")
+    model = get_config_value(config, "ai.model", "doubao-1-5-pro-256k")
+    temperature = float(get_config_value(config, "ai.temperature", 0.3))
+    max_tokens = int(get_config_value(config, "ai.max_tokens", 4096))
+
+    if not api_key:
+        print("[错误] 未配置 ARK_API_KEY。请设置环境变量或在 config.json 中配置 ai.api_key", file=sys.stderr)
         sys.exit(1)
 
-    print(f"🤖 正在调用 AI ({ARK_MODEL}) 生成周报...")
+    print(f"🤖 正在调用 AI ({model}) 生成周报...")
 
-    url = f"{ARK_BASE_URL}/chat/completions"
+    url = f"{base_url}/chat/completions"
     payload = json.dumps({
-        "model": ARK_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": "你是一位专业的职场周报助手，擅长从工作数据中提炼关键信息，生成结构清晰、内容充实的周报。"},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
-        "max_tokens": 4096,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }).encode("utf-8")
 
     req = urllib.request.Request(
-        url,
-        data=payload,
+        url, data=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {ARK_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
         },
     )
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            content = result["choices"][0]["message"]["content"]
-            return content.strip()
+            return result["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"[错误] AI API 请求失败 (HTTP {e.code})", file=sys.stderr)
@@ -274,14 +413,9 @@ def call_ai(prompt: str) -> str:
 # 飞书文档创建
 # ============================================================
 
-def create_feishu_doc(
-    title: str,
-    content: str,
-    mode: str = DOCS_CREATE_MODE,
-    docs_cmd: list[str] | None = None,
-) -> str:
+def create_feishu_doc(title: str, content: str, mode: str = "file") -> str:
     """创建飞书文档并返回文档 URL 或 ID。"""
-    cmd = docs_cmd or DOCS_CREATE_COMMAND
+    cmd = ["lark-cli", "docs", "+create"]
     print(f"📝 正在创建飞书文档: {title}...")
 
     if mode == "arg":
@@ -295,7 +429,6 @@ def create_feishu_doc(
         try:
             tmp_file.write(content)
             tmp_file.close()
-            # @file 需要相对路径，临时文件在 cwd 下，直接用文件名即可
             command = cmd + ["--title", title, "--markdown", f"@{os.path.basename(tmp_file.name)}"]
             result = run_cli_command(command, expect_json=False)
         finally:
@@ -311,6 +444,35 @@ def create_feishu_doc(
 
 
 # ============================================================
+# 消息推送
+# ============================================================
+
+def send_to_chat(text: str, config: dict) -> str | None:
+    """将周报推送到飞书群聊或用户。"""
+    chat_id = get_config_value(config, "notify.chat_id", "")
+    user_id = get_config_value(config, "notify.user_id", "")
+    send_as = get_config_value(config, "notify.send_as", "user")
+
+    if not chat_id and not user_id:
+        return None
+
+    print(f"💬 正在发送周报到飞书...")
+
+    # 构建消息命令
+    command = ["lark-cli", "im", "+messages-send", "--as", send_as]
+
+    if chat_id:
+        command += ["--chat-id", chat_id]
+    elif user_id:
+        command += ["--user-id", user_id]
+
+    command += ["--text", text]
+
+    result = run_cli_command(command, expect_json=False)
+    return result
+
+
+# ============================================================
 # 主流程
 # ============================================================
 
@@ -320,12 +482,14 @@ def main():
     )
     parser.add_argument("--no-ai", action="store_true", help="仅获取数据，不调用 AI 生成周报")
     parser.add_argument("--no-doc", action="store_true", help="不自动创建飞书文档")
-    parser.add_argument("--docs-cmd", nargs="+", default=None, help="自定义文档创建命令")
+    parser.add_argument("--no-notify", action="store_true", help="不发送消息到群聊")
+    parser.add_argument("--config", default=None, help="指定配置文件路径（默认: ./config.json）")
     parser.add_argument("--docs-mode", choices=["arg", "file", "stdin"], default=None, help="文档内容传入模式")
     args = parser.parse_args()
 
-    docs_cmd = args.docs_cmd or DOCS_CREATE_COMMAND
-    docs_mode = args.docs_mode or DOCS_CREATE_MODE
+    # 加载配置
+    config = load_config(args.config)
+    docs_mode = args.docs_mode or get_config_value(config, "docs.mode", "file")
 
     # 1. 计算本周日期范围
     start_date, end_date = get_this_week_range()
@@ -337,23 +501,37 @@ def main():
     # 3. 获取任务列表
     tasks = fetch_tasks()
 
-    # 4. 构建 Prompt 并调用 AI 生成周报
+    # 4. 应用排除规则
+    calendar_events = filter_calendar_events(calendar_events, config)
+    tasks = filter_tasks(tasks, config)
+
+    # 5. 构建 Prompt 并调用 AI 生成周报
     weekly_report = None
     if not args.no_ai:
-        prompt = build_weekly_prompt(start_date, end_date, calendar_events, tasks)
-        weekly_report = call_ai(prompt)
+        prompt = build_weekly_prompt(start_date, end_date, calendar_events, tasks, config)
+        weekly_report = call_ai(prompt, config)
 
-    # 5. 自动创建飞书文档
+    # 6. 自动创建飞书文档
     doc_url = None
     if weekly_report and not args.no_doc:
-        doc_title = f"周报 ({start_date} ~ {end_date})"
+        title_pattern = get_config_value(config, "report.title_pattern", "周报 ({start} ~ {end})")
+        doc_title = title_pattern.format(start=start_date, end=end_date)
         doc_content = (
             f"# {doc_title}\n\n{weekly_report}\n\n"
             f"---\n*由 AI 自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
         )
-        doc_url = create_feishu_doc(title=doc_title, content=doc_content, mode=docs_mode, docs_cmd=docs_cmd)
+        doc_url = create_feishu_doc(title=doc_title, content=doc_content, mode=docs_mode)
 
-    # 6. 组装最终输出
+    # 7. 发送消息到群聊
+    notify_result = None
+    if weekly_report and not args.no_notify:
+        notify_text = (
+            f"📋 {title_pattern.format(start=start_date, end=end_date)}\n\n"
+            f"{weekly_report}"
+        )
+        notify_result = send_to_chat(notify_text, config)
+
+    # 8. 组装最终输出
     output = {
         "week_range": {"start": start_date, "end": end_date},
         "calendar_events": calendar_events,
@@ -364,6 +542,8 @@ def main():
         output["weekly_report"] = weekly_report
     if doc_url:
         output["feishu_doc"] = doc_url
+    if notify_result:
+        output["notify_result"] = notify_result
 
     # ---- Markdown 输出 ----
     if weekly_report:
@@ -377,6 +557,12 @@ def main():
         print("🔗 飞书文档")
         print("=" * 60)
         print(doc_url)
+
+    if notify_result:
+        print("\n" + "=" * 60)
+        print("💬 消息推送")
+        print("=" * 60)
+        print("已发送")
 
     # ---- JSON 保存 ----
     json_output = json.dumps(output, ensure_ascii=False, indent=2)
