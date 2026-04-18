@@ -88,8 +88,8 @@ def fetch_calendar_events(start_date: str, end_date: str) -> dict | list:
         "lark-cli",
         "calendar",
         "+agenda",
-        "--from", start_date,
-        "--to", end_date,
+        "--start", start_date,
+        "--end", end_date,
     ]
     return run_cli_command(command)
 
@@ -100,7 +100,7 @@ def fetch_tasks() -> dict | list:
     command = [
         "lark-cli",
         "task",
-        "+list",
+        "+get-my-tasks",
     ]
     return run_cli_command(command)
 

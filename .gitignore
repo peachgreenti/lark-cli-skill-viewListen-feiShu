@@ -1,20 +1,11 @@
-# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
+*.pyc
+*.pyo
+*.log
+.env
+.venv/
+venv/
 dist/
 build/
-
-# Output files
-feishu_weekly_*.json
-weekly_report_*.md
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
+*.egg-info/
 .DS_Store
-Thumbs.db
