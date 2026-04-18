@@ -1,11 +1,27 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-*.log
+*.pyd
+
+# Virtual environments
 .env
 .venv/
 venv/
+
+# Logs
+*.log
+
+# Build artifacts
 dist/
 build/
 *.egg-info/
+
+# macOS
 .DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
