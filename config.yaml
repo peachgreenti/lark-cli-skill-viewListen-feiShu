@@ -1,94 +1,55 @@
-# ============================================================
-# 飞书消息监听 & AI 分类 - 配置文件
-# ============================================================
+# ============================================
+# 飞书消息监听 + AI 分类 + 每日摘要 配置文件
+# ============================================
 
-# ---------- 监听器配置 ----------
+# ---- 监听配置 ----
 listener:
-  # 飞书事件名称（固定值，请勿修改）
   event_name: "im.message.receive_v1"
-  # 输出格式，目前仅支持 ndjson
   output_format: "ndjson"
-  # 允许处理的群聊/单聊 chat_id 列表，为空则处理所有
-  allowed_chat_ids: []
-  # 是否忽略机器人自身发送的消息
+  allowed_chat_ids:
+    - "oc_0fbad9383486e3e43300f2daee013845"  # 机器人功能体验群
   ignore_bot_messages: true
 
-# ---------- AI 分类配置 ----------
+# ---- AI 分类配置 ----
 ai:
-  # AI 提供商：ark（火山引擎豆包大模型）或 lark（飞书内置 AI）
-  provider: "ark"
-  # 飞书内置 AI 模型名称（provider 为 lark 时使用）
-  model: "spark-lite"
-  # AI 调用超时时间（秒）
+  provider: "ark"            # ark（火山引擎豆包大模型）/ lark（飞书内置 AI）
+  model: "spark-lite"        # lark 模式时使用
   timeout: 30
-  # 是否启用 AI 分类
   enabled: true
-  # ARK（火山引擎方舟）配置（provider 为 ark 时使用）
-  # API Key 也可通过环境变量 ARK_API_KEY 设置
-  ark_api_key: ""
-  # ARK 推理接入点 ID（在火山引擎方舟控制台创建）
+  ark_api_key: ""            # 也可通过环境变量 ARK_API_KEY 设置
   ark_endpoint_id: "ep-20260418212629-26ftq"
-  # ARK API 基础 URL（一般不需要修改）
   ark_base_url: "https://ark.cn-beijing.volces.com/api/v3"
-  # AI 分类 Prompt（要求返回 JSON 格式）
   classification_prompt: |
     你是一个消息分类助手。请对以下飞书群聊消息进行优先级分类。
-
     优先级定义：
-    - P0（紧急）：生产环境故障、线上事故、核心服务不可用、数据丢失、安全事件、需要立即响应的紧急问题
-    - P1（重要）：客户反馈的严重问题、即将到期的关键任务、重要会议通知、需要当天处理的业务问题、影响用户体验的缺陷
-    - P2（一般）：日常开发讨论、代码审查请求、一般性技术问题、非紧急的文档更新、团队协作沟通、常规任务分配
-    - P3（低优）：闲聊、表情包、非工作相关话题、已解决问题的后续讨论、信息确认、日常问候
+    - P0（紧急）：生产环境故障、线上事故、安全事件
+    - P1（重要）：客户严重问题、关键任务、紧急需求
+    - P2（一般）：日常开发讨论、项目沟通
+    - P3（低优）：闲聊、非工作话题
+    请以 JSON 格式返回：{"priority": "P0/P1/P2/P3", "reason": "分类理由", "category": "类别"}
 
-    分类要求：
-    1. 根据消息内容判断优先级
-    2. 给出简要的分类理由
-    3. 如果消息包含多个话题，以最高优先级为准
-    4. 请以 JSON 格式返回，格式如下：
-    {
-      "priority": "P0/P1/P2/P3",
-      "reason": "分类理由（一句话）",
-      "category": "消息类别（如：故障报告/技术讨论/日常沟通/闲聊等）"
-    }
+    消息内容：{message}
 
-    请对以下消息进行分类：
-    {message}
-
-# ---------- FAQ 自动回复配置 ----------
+# ---- FAQ 知识库配置 ----
 faq:
-  # 是否启用 FAQ 自动回复
   enabled: false
-  # FAQ 知识库文件路径
   file_path: "faq.yaml"
-  # 匹配模式：keyword（关键词精确匹配）或 fuzzy（模糊匹配）
   match_mode: "keyword"
-  # 模糊匹配阈值（0-1，越大要求越严格）
   fuzzy_threshold: 0.6
 
-# ---------- 每日摘要报告配置 ----------
+# ---- 每日摘要报告配置 ----
 report:
-  # 是否启用每日摘要报告
   enabled: true
-  # 报告生成时间（小时，24小时制）
   hour: 18
-  # 报告生成时间（分钟）
   minute: 0
-  # 飞书云文档标题前缀
   title_prefix: "飞书消息每日摘要"
-  # 报告生成后是否清空当日消息
   clear_after_report: true
-  # 创建飞书文档超时时间（秒）
   create_timeout: 60
 
-# ---------- 日志配置 ----------
+# ---- 日志配置 ----
 logging:
-  # 日志级别：DEBUG / INFO / WARNING / ERROR / CRITICAL
   level: "INFO"
-  # 日志文件路径
   file_path: "listen_feishu.log"
-  # 单个日志文件最大大小（MB）
   max_size_mb: 10
-  # 保留的日志备份文件数量
   backup_count: 5
-  # 日志格式
   format: "%(asctime)s [%(levelname)s] %(name)s - %(message)s"

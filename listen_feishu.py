@@ -712,37 +712,27 @@ def create_feishu_doc(title: str, content: str, timeout: int = 60) -> str | None
         创建的文档 URL，或 None（失败时）
     """
     try:
-        # 将 Markdown 内容写入临时文件
-        tmp_file = Path(f"/tmp/feishu_report_{int(time.time())}.md")
-        tmp_file.write_text(content, encoding="utf-8")
+        result = subprocess.run(
+            ["lark-cli", "docs", "+create", "--title", title, "--markdown", content],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
 
-        try:
-            result = subprocess.run(
-                ["lark-cli", "docs", "+create", "--title", title, "--file", str(tmp_file)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+        if result.returncode != 0:
+            logger.error("创建飞书文档失败: %s", result.stderr.strip())
+            return None
 
-            if result.returncode != 0:
-                logger.error("创建飞书文档失败: %s", result.stderr.strip())
-                return None
+        # 尝试从输出中提取文档 URL
+        output = result.stdout.strip()
+        url_match = re.search(r"https?://[^\s]+", output)
+        if url_match:
+            doc_url = url_match.group(0)
+            logger.info("飞书文档已创建: %s", doc_url)
+            return doc_url
 
-            # 尝试从输出中提取文档 URL
-            output = result.stdout.strip()
-            url_match = re.search(r"https?://[^\s]+", output)
-            if url_match:
-                doc_url = url_match.group(0)
-                logger.info("飞书文档已创建: %s", doc_url)
-                return doc_url
-
-            logger.info("飞书文档已创建（未提取到URL）: %s", output)
-            return output
-
-        finally:
-            # 清理临时文件
-            if tmp_file.exists():
-                tmp_file.unlink()
+        logger.info("飞书文档已创建（未提取到URL）: %s", output)
+        return output
 
     except subprocess.TimeoutExpired:
         logger.error("创建飞书文档超时（%s 秒）", timeout)
@@ -973,16 +963,16 @@ def main() -> None:
     handler.start()
 
     try:
-        # 通过 lark-cli event subscribe 监听飞书事件
+        # 通过 lark-cli event +subscribe 监听飞书事件（NDJSON 输出）
         event_name = config.get("listener", {}).get("event_name", "im.message.receive_v1")
-        output_format = config.get("listener", {}).get("output_format", "ndjson")
 
         cmd = [
             "lark-cli",
             "event",
-            "subscribe",
-            "--event", event_name,
-            "--output", output_format,
+            "+subscribe",
+            "--event-types", event_name,
+            "--as", "bot",
+            "--quiet",
         ]
 
         logger.info("启动事件监听: %s", " ".join(cmd))
