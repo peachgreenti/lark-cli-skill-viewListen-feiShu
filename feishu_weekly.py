@@ -9,13 +9,52 @@
 import argparse
 import fnmatch
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import traceback
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
+
+
+# ============================================================
+# 日志配置
+# ============================================================
+
+def setup_logging(verbose: bool = False, log_file: str | None = None) -> logging.Logger:
+    """配置日志：同时输出到控制台和文件。"""
+    logger = logging.getLogger("feishu_weekly")
+    logger.setLevel(logging.DEBUG)
+
+    # 控制台 handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_fmt)
+    logger.addHandler(console_handler)
+
+    # 文件 handler（可选）
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_fmt = logging.Formatter(
+            "%(asctime)s %(levelname)-5s [%(funcName)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        file_handler.setFormatter(file_fmt)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# 全局 logger，在 main() 中初始化
+logger = logging.getLogger("feishu_weekly")
 
 
 # ============================================================
@@ -37,9 +76,13 @@ def load_config(config_path: str | None = None) -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-            print(f"⚙️  已加载配置文件: {path}")
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"[警告] 配置文件加载失败: {e}，使用默认配置", file=sys.stderr)
+            logger.info("已加载配置文件: %s", path)
+        except json.JSONDecodeError as e:
+            logger.warning("配置文件 JSON 格式错误: %s，使用默认配置", e)
+        except IOError as e:
+            logger.warning("配置文件读取失败: %s，使用默认配置", e)
+    else:
+        logger.debug("配置文件不存在: %s，使用默认配置", path)
 
     # 环境变量覆盖（最高优先级）
     env_overrides = {
@@ -51,12 +94,13 @@ def load_config(config_path: str | None = None) -> dict:
         if val:
             section, field = key.split(".", 1)
             config.setdefault(section, {})[field] = val
+            logger.debug("环境变量覆盖: %s = %s***", key, val[:8] if len(val) > 8 else val)
 
     return config
 
 
 def get_config_value(config: dict, key_path: str, default=None):
-    """从嵌套字典中获取配置值，如 get_config_value(config, 'ai.model', 'default')。"""
+    """从嵌套字典中获取配置值。"""
     keys = key_path.split(".")
     val = config
     for k in keys:
@@ -87,6 +131,8 @@ def run_cli_command(
     stdin_data: str | None = None,
 ) -> dict | list | str:
     """执行 lark-cli 命令。"""
+    cmd_str = " ".join(command)
+    logger.debug("执行命令: %s", cmd_str)
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, check=True, input=stdin_data,
@@ -94,15 +140,17 @@ def run_cli_command(
         if expect_json:
             return json.loads(result.stdout.strip())
         return result.stdout.strip()
+    except FileNotFoundError:
+        logger.error("命令不存在: %s，请确认 lark-cli 已安装", command[0])
+        sys.exit(1)
     except subprocess.CalledProcessError as e:
-        print(f"[错误] 命令执行失败: {' '.join(command)}", file=sys.stderr)
-        print(f"  返回码: {e.returncode}", file=sys.stderr)
+        logger.error("命令执行失败: %s (返回码 %d)", cmd_str, e.returncode)
         if e.stderr:
-            print(f"  错误信息: {e.stderr.strip()}", file=sys.stderr)
+            logger.error("错误输出: %s", e.stderr.strip()[:300])
         sys.exit(1)
     except json.JSONDecodeError as e:
-        print(f"[错误] JSON 解析失败: {e}", file=sys.stderr)
-        print(f"  原始输出: {result.stdout[:500]}", file=sys.stderr)
+        logger.error("JSON 解析失败: %s", e)
+        logger.debug("原始输出: %s", result.stdout[:500])
         sys.exit(1)
 
 
@@ -112,7 +160,7 @@ def run_cli_command(
 
 def fetch_calendar_events(start_date: str, end_date: str) -> dict | list:
     """获取本周日历事件。"""
-    print(f"📅 正在获取日历事件 ({start_date} ~ {end_date})...")
+    logger.info("正在获取日历事件 (%s ~ %s)...", start_date, end_date)
     return run_cli_command([
         "lark-cli", "calendar", "+agenda",
         "--start", start_date, "--end", end_date,
@@ -121,7 +169,7 @@ def fetch_calendar_events(start_date: str, end_date: str) -> dict | list:
 
 def fetch_tasks() -> dict | list:
     """获取任务列表。"""
-    print("✅ 正在获取任务列表...")
+    logger.info("正在获取任务列表...")
     return run_cli_command(["lark-cli", "task", "+get-my-tasks"])
 
 
@@ -165,16 +213,17 @@ def filter_calendar_events(raw: dict | list, config: dict) -> dict | list:
 
         if should_exclude(summary, keywords):
             excluded_count += 1
-            print(f"  🔕 排除事件: {summary}")
+            logger.debug("排除事件（关键词）: %s", summary)
             continue
         if should_exclude(organizer, organizers):
             excluded_count += 1
-            print(f"  🔕 排除事件（组织者）: {summary} (by {organizer})")
+            logger.debug("排除事件（组织者）: %s (by %s)", summary, organizer)
             continue
         filtered.append(ev)
 
     if excluded_count > 0:
-        print(f"  📊 日历事件: 原始 {len(events)} 条 → 过滤后 {len(filtered)} 条（排除 {excluded_count} 条）")
+        logger.info("日历事件: 原始 %d 条 → 过滤后 %d 条（排除 %d 条）",
+                     len(events), len(filtered), excluded_count)
 
     result = dict(raw) if isinstance(raw, dict) else {"data": events}
     if isinstance(raw, dict):
@@ -205,15 +254,17 @@ def filter_tasks(raw: dict | list, config: dict) -> dict | list:
 
         if completed and hide_completed:
             excluded_count += 1
+            logger.debug("排除已完成任务: %s", summary)
             continue
         if should_exclude(summary, keywords):
             excluded_count += 1
-            print(f"  🔕 排除任务: {summary}")
+            logger.debug("排除任务（关键词）: %s", summary)
             continue
         filtered.append(task)
 
     if excluded_count > 0:
-        print(f"  📊 任务列表: 原始 {len(items)} 条 → 过滤后 {len(filtered)} 条（排除 {excluded_count} 条）")
+        logger.info("任务列表: 原始 %d 条 → 过滤后 %d 条（排除 %d 条）",
+                     len(items), len(filtered), excluded_count)
 
     result = dict(raw) if isinstance(raw, dict) else {"data": {"items": items}}
     if isinstance(raw, dict) and isinstance(result.get("data"), dict):
@@ -222,11 +273,11 @@ def filter_tasks(raw: dict | list, config: dict) -> dict | list:
 
 
 # ============================================================
-# 数据提取 — 从原始 JSON 中提取关键信息，构建结构化 Prompt
+# 数据提取
 # ============================================================
 
 def extract_calendar_info(raw: dict | list) -> str:
-    """从日历事件原始数据中提取关键信息，生成结构化文本。"""
+    """从日历事件原始数据中提取关键信息。"""
     lines = []
     try:
         events = raw.get("data", []) if isinstance(raw, dict) else raw
@@ -255,12 +306,13 @@ def extract_calendar_info(raw: dict | list) -> str:
                 lines.append(f"  描述: {desc_short}")
             lines.append("")
     except Exception as e:
+        logger.error("日历数据解析异常: %s\n%s", e, traceback.format_exc())
         lines.append(f"（日历数据解析异常: {e}）")
     return "\n".join(lines)
 
 
 def extract_tasks_info(raw: dict | list) -> str:
-    """从任务列表原始数据中提取关键信息，生成结构化文本。"""
+    """从任务列表原始数据中提取关键信息。"""
     lines = []
     try:
         data = raw.get("data", {}) if isinstance(raw, dict) else {}
@@ -287,6 +339,7 @@ def extract_tasks_info(raw: dict | list) -> str:
                 lines.append(f"  截止: {due_at[:16]}")
             lines.append("")
     except Exception as e:
+        logger.error("任务数据解析异常: %s\n%s", e, traceback.format_exc())
         lines.append(f"（任务数据解析异常: {e}）")
     return "\n".join(lines)
 
@@ -348,21 +401,29 @@ def build_weekly_prompt(
 
     # 优先级：命令行 --template > 配置文件 custom_prompt > 内置模板
     if template_path and os.path.exists(template_path):
-        with open(template_path, "r", encoding="utf-8") as f:
-            template = f.read().strip()
-        print(f"📝 已加载自定义模板: {template_path}")
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                template = f.read().strip()
+            logger.info("已加载自定义模板: %s", template_path)
+        except IOError as e:
+            logger.error("模板文件读取失败: %s，回退到内置模板", e)
+            template = BUILTIN_PROMPT_TEMPLATE
     else:
         custom_prompt = get_config_value(config, "report.custom_prompt", "")
         template = custom_prompt.strip() if custom_prompt else BUILTIN_PROMPT_TEMPLATE
 
-    return template.format(
-        start_date=start_date,
-        end_date=end_date,
-        start=start_date,
-        end=end_date,
-        calendar_events=calendar_info,
-        tasks=tasks_info,
-    )
+    try:
+        return template.format(
+            start_date=start_date,
+            end_date=end_date,
+            start=start_date,
+            end=end_date,
+            calendar_events=calendar_info,
+            tasks=tasks_info,
+        )
+    except KeyError as e:
+        logger.error("模板占位符错误: 缺少 %s，请检查模板文件", e)
+        sys.exit(1)
 
 
 def call_ai(prompt: str, config: dict) -> str:
@@ -374,10 +435,11 @@ def call_ai(prompt: str, config: dict) -> str:
     max_tokens = int(get_config_value(config, "ai.max_tokens", 4096))
 
     if not api_key:
-        print("[错误] 未配置 ARK_API_KEY。请设置环境变量或在 config.json 中配置 ai.api_key", file=sys.stderr)
+        logger.error("未配置 ARK_API_KEY。请设置环境变量或在 config.json 中配置 ai.api_key")
         sys.exit(1)
 
-    print(f"🤖 正在调用 AI ({model}) 生成周报...")
+    logger.info("正在调用 AI (%s) 生成周报...", model)
+    logger.debug("Prompt 长度: %d 字符", len(prompt))
 
     url = f"{base_url}/chat/completions"
     payload = json.dumps({
@@ -401,17 +463,18 @@ def call_ai(prompt: str, config: dict) -> str:
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"].strip()
+            content = result["choices"][0]["message"]["content"].strip()
+            logger.info("AI 周报生成成功（%d 字符）", len(content))
+            return content
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        print(f"[错误] AI API 请求失败 (HTTP {e.code})", file=sys.stderr)
-        print(f"  响应: {body[:500]}", file=sys.stderr)
+        logger.error("AI API 请求失败 (HTTP %d): %s", e.code, body[:300])
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"[错误] AI API 连接失败: {e.reason}", file=sys.stderr)
+        logger.error("AI API 连接失败: %s", e.reason)
         sys.exit(1)
     except (KeyError, IndexError) as e:
-        print(f"[错误] AI API 响应格式异常: {e}", file=sys.stderr)
+        logger.error("AI API 响应格式异常: %s", e)
         sys.exit(1)
 
 
@@ -422,31 +485,35 @@ def call_ai(prompt: str, config: dict) -> str:
 def create_feishu_doc(title: str, content: str, mode: str = "file") -> str:
     """创建飞书文档并返回文档 URL 或 ID。"""
     cmd = ["lark-cli", "docs", "+create"]
-    print(f"📝 正在创建飞书文档: {title}...")
+    logger.info("正在创建飞书文档: %s (模式: %s)", title, mode)
 
-    if mode == "arg":
-        command = cmd + ["--title", title, "--markdown", content]
-        result = run_cli_command(command, expect_json=False)
-    elif mode == "file":
-        import tempfile
-        tmp_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, encoding="utf-8", dir=os.getcwd()
-        )
-        try:
-            tmp_file.write(content)
-            tmp_file.close()
-            command = cmd + ["--title", title, "--markdown", f"@{os.path.basename(tmp_file.name)}"]
+    try:
+        if mode == "arg":
+            command = cmd + ["--title", title, "--markdown", content]
             result = run_cli_command(command, expect_json=False)
-        finally:
-            os.unlink(tmp_file.name)
-    elif mode == "stdin":
-        command = cmd + ["--title", title, "--markdown", "-"]
-        result = run_cli_command(command, expect_json=False, stdin_data=content)
-    else:
-        print(f"[错误] 不支持的文档创建模式: {mode}", file=sys.stderr)
-        sys.exit(1)
+        elif mode == "file":
+            tmp_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False, encoding="utf-8", dir=os.getcwd()
+            )
+            try:
+                tmp_file.write(content)
+                tmp_file.close()
+                command = cmd + ["--title", title, "--markdown", f"@{os.path.basename(tmp_file.name)}"]
+                result = run_cli_command(command, expect_json=False)
+            finally:
+                os.unlink(tmp_file.name)
+        elif mode == "stdin":
+            command = cmd + ["--title", title, "--markdown", "-"]
+            result = run_cli_command(command, expect_json=False, stdin_data=content)
+        else:
+            logger.error("不支持的文档创建模式: %s", mode)
+            sys.exit(1)
 
-    return result
+        logger.info("飞书文档创建成功")
+        return result
+    except Exception as e:
+        logger.error("飞书文档创建失败: %s\n%s", e, traceback.format_exc())
+        sys.exit(1)
 
 
 # ============================================================
@@ -454,30 +521,58 @@ def create_feishu_doc(title: str, content: str, mode: str = "file") -> str:
 # ============================================================
 
 def send_to_chat(text: str, config: dict, send_to: str | None = None) -> str | None:
-    """将周报推送到飞书群聊或用户。send_to 可覆盖配置文件中的目标。"""
-    # 优先使用命令行 --send-to
+    """将周报推送到飞书群聊或用户。"""
     target = send_to or get_config_value(config, "notify.chat_id", "") or get_config_value(config, "notify.user_id", "")
     send_as = get_config_value(config, "notify.send_as", "user")
 
     if not target:
+        logger.debug("未配置推送目标，跳过消息推送")
         return None
 
-    print(f"💬 正在发送周报到飞书 ({target[:8]}...)...")
+    logger.info("正在发送周报到飞书 (%s...)...", target[:12])
 
-    # 自动判断目标类型
     command = ["lark-cli", "im", "+messages-send", "--as", send_as]
     if target.startswith("oc_"):
         command += ["--chat-id", target]
     elif target.startswith("ou_"):
         command += ["--user-id", target]
     else:
-        # 默认当作 chat_id
         command += ["--chat-id", target]
 
     command += ["--text", text]
 
-    result = run_cli_command(command, expect_json=False)
-    return result
+    try:
+        result = run_cli_command(command, expect_json=False)
+        logger.info("消息推送成功")
+        return result
+    except Exception as e:
+        logger.error("消息推送失败: %s\n%s", e, traceback.format_exc())
+        return None
+
+
+# ============================================================
+# 文件输出
+# ============================================================
+
+def save_output(output: dict, start_date: str, end_date: str, weekly_report: str | None) -> None:
+    """保存 JSON 和 Markdown 文件。"""
+    try:
+        # JSON
+        json_output = json.dumps(output, ensure_ascii=False, indent=2)
+        output_file = f"feishu_weekly_{start_date}_{end_date}.json"
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(json_output)
+        logger.info("结果已保存到: %s", output_file)
+
+        # Markdown 周报
+        if weekly_report:
+            md_file = f"weekly_report_{start_date}_{end_date}.md"
+            with open(md_file, "w", encoding="utf-8") as f:
+                f.write(f"# 周报 ({start_date} ~ {end_date})\n\n{weekly_report}\n\n")
+                f.write(f"---\n*由 AI 自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
+            logger.info("周报已保存到: %s", md_file)
+    except IOError as e:
+        logger.error("文件保存失败: %s", e)
 
 
 # ============================================================
@@ -485,6 +580,8 @@ def send_to_chat(text: str, config: dict, send_to: str | None = None) -> str | N
 # ============================================================
 
 def main():
+    global logger
+
     parser = argparse.ArgumentParser(
         description="飞书本周数据获取 + AI 周报生成 + 自动创建飞书文档"
     )
@@ -496,22 +593,27 @@ def main():
     parser.add_argument("--template", default=None, help="自定义 Prompt 模板文件路径（Markdown 格式，支持占位符）")
     parser.add_argument("--config", default=None, help="指定配置文件路径（默认: ./config.json）")
     parser.add_argument("--docs-mode", choices=["arg", "file", "stdin"], default=None, help="文档内容传入模式")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志输出（DEBUG 级别）")
+    parser.add_argument("--log-file", default=None, help="日志文件路径（默认不输出文件）")
     args = parser.parse_args()
+
+    # 初始化日志
+    logger = setup_logging(verbose=args.verbose, log_file=args.log_file)
 
     # 加载配置
     config = load_config(args.config)
     docs_mode = args.docs_mode or get_config_value(config, "docs.mode", "file")
 
-    # dry-run 模式：隐含 --no-ai --no-doc --no-notify
+    # dry-run 模式
     if args.dry_run:
         args.no_ai = True
         args.no_doc = True
         args.no_notify = True
-        print("🔍 预览模式（dry-run）：仅获取和过滤数据\n")
+        logger.info("预览模式（dry-run）：仅获取和过滤数据")
 
     # 1. 计算本周日期范围
     start_date, end_date = get_this_week_range()
-    print(f"📅 本周范围: {start_date} ~ {end_date}\n")
+    logger.info("本周范围: %s ~ %s", start_date, end_date)
 
     # 2. 获取日历事件
     calendar_events = fetch_calendar_events(start_date, end_date)
@@ -523,13 +625,13 @@ def main():
     calendar_events = filter_calendar_events(calendar_events, config)
     tasks = filter_tasks(tasks, config)
 
-    # 5. dry-run: 输出过滤后的数据摘要并退出
+    # 5. dry-run: 输出摘要并退出
     if args.dry_run:
+        calendar_info = extract_calendar_info(calendar_events)
+        tasks_info = extract_tasks_info(tasks)
         print("\n" + "=" * 60)
         print("📊 数据预览（dry-run）")
         print("=" * 60)
-        calendar_info = extract_calendar_info(calendar_events)
-        tasks_info = extract_tasks_info(tasks)
         print(f"\n📅 日历事件:\n{calendar_info}")
         print(f"\n✅ 任务列表:\n{tasks_info}")
         print(f"\n💡 完整运行命令: python3 {os.path.basename(__file__)}")
@@ -541,7 +643,7 @@ def main():
         prompt = build_weekly_prompt(start_date, end_date, calendar_events, tasks, config, template_path=args.template)
         weekly_report = call_ai(prompt, config)
 
-    # 6. 自动创建飞书文档
+    # 7. 自动创建飞书文档
     doc_url = None
     if weekly_report and not args.no_doc:
         title_pattern = get_config_value(config, "report.title_pattern", "周报 ({start} ~ {end})")
@@ -552,16 +654,14 @@ def main():
         )
         doc_url = create_feishu_doc(title=doc_title, content=doc_content, mode=docs_mode)
 
-    # 7. 发送消息到群聊
+    # 8. 发送消息到群聊
     notify_result = None
     if weekly_report and not args.no_notify:
-        notify_text = (
-            f"📋 {title_pattern.format(start=start_date, end=end_date)}\n\n"
-            f"{weekly_report}"
-        )
+        title_pattern = get_config_value(config, "report.title_pattern", "周报 ({start} ~ {end})")
+        notify_text = f"📋 {title_pattern.format(start=start_date, end=end_date)}\n\n{weekly_report}"
         notify_result = send_to_chat(notify_text, config, send_to=args.send_to)
 
-    # 8. 组装最终输出
+    # 9. 组装最终输出
     output = {
         "week_range": {"start": start_date, "end": end_date},
         "calendar_events": calendar_events,
@@ -575,7 +675,7 @@ def main():
     if notify_result:
         output["notify_result"] = notify_result
 
-    # ---- Markdown 输出 ----
+    # ---- 控制台输出 ----
     if weekly_report:
         print("\n" + "=" * 60)
         print("📋 AI 生成的周报")
@@ -594,20 +694,10 @@ def main():
         print("=" * 60)
         print("已发送")
 
-    # ---- JSON 保存 ----
-    json_output = json.dumps(output, ensure_ascii=False, indent=2)
-    output_file = f"feishu_weekly_{start_date}_{end_date}.json"
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(json_output)
-    print(f"\n💾 结果已保存到: {output_file}")
+    # ---- 文件保存 ----
+    save_output(output, start_date, end_date, weekly_report)
 
-    # ---- Markdown 周报文件 ----
-    if weekly_report:
-        md_file = f"weekly_report_{start_date}_{end_date}.md"
-        with open(md_file, "w", encoding="utf-8") as f:
-            f.write(f"# 周报 ({start_date} ~ {end_date})\n\n{weekly_report}\n\n")
-            f.write(f"---\n*由 AI 自动生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
-        print(f"📄 周报已保存到: {md_file}")
+    logger.info("全部完成 ✓")
 
 
 if __name__ == "__main__":
