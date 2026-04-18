@@ -145,10 +145,12 @@ def extract_tasks_info(raw: dict | list) -> str:
             status = ""
             if due_at:
                 try:
-                    due_dt = datetime.fromisoformat(due_at.replace("+08:00", "+08:00"))
-                    if due_dt < datetime.now():
+                    from datetime import timezone
+                    due_dt = datetime.fromisoformat(due_at)
+                    now_dt = datetime.now(timezone.utc).astimezone(due_dt.tzinfo)
+                    if due_dt < now_dt:
                         status = " ⚠️ 已过期"
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
 
             lines.append(f"- {summary}{status}")
