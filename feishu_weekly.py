@@ -290,12 +290,13 @@ def create_feishu_doc(
     elif mode == "file":
         import tempfile
         tmp_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, encoding="utf-8"
+            mode="w", suffix=".md", delete=False, encoding="utf-8", dir=os.getcwd()
         )
         try:
             tmp_file.write(content)
             tmp_file.close()
-            command = cmd + ["--title", title, "--markdown", f"@{tmp_file.name}"]
+            # @file 需要相对路径，临时文件在 cwd 下，直接用文件名即可
+            command = cmd + ["--title", title, "--markdown", f"@{os.path.basename(tmp_file.name)}"]
             result = run_cli_command(command, expect_json=False)
         finally:
             os.unlink(tmp_file.name)

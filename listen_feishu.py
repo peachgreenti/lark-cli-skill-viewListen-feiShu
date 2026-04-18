@@ -4,7 +4,7 @@
 
 功能：
   - 通过 lark-cli 监听飞书群聊消息（im.message.receive_v1 事件）
-  - 使用飞书内置 AI（spark-lite）对消息进行优先级分类（P0-P3）
+  - 使用飞书内置 AI（spark-lite）或火山引擎 ARK（豆包大模型）进行优先级分类（P0-P3）
   - 支持 FAQ 自动回复（关键词 / 模糊匹配）
   - 每日定时生成摘要报告并创建飞书云文档
   - 线程安全的消息存储，跨天自动清空
@@ -21,6 +21,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, date
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -47,10 +49,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "ignore_bot_messages": True,
     },
     "ai": {
+        "provider": "ark",          # "ark"（豆包大模型）或 "lark"（飞书内置 AI）
         "model": "spark-lite",
         "timeout": 30,
         "enabled": True,
         "classification_prompt": "",
+        # ARK（火山引擎方舟）配置
+        "ark_api_key": "",           # 也可通过环境变量 ARK_API_KEY 设置
+        "ark_endpoint_id": "",       # ARK 推理接入点 ID
+        "ark_base_url": "https://ark.cn-beijing.volces.com/api/v3",
     },
     "faq": {
         "enabled": False,
@@ -152,7 +159,70 @@ def setup_logging(log_config: dict[str, Any]) -> None:
 # AI 分类
 # ============================================================
 
-def call_feishu_ai(message: str, config: dict[str, Any]) -> dict | None:
+def call_ark_ai(message: str, config: dict[str, Any]) -> dict | None:
+    """
+    通过火山引擎 ARK（豆包大模型）进行消息分类。
+    ARK 兼容 OpenAI API 格式，使用 urllib 直接调用（无需额外依赖）。
+
+    Args:
+        message: 待分类的消息文本
+        config: AI 配置段
+
+    Returns:
+        解析后的分类结果字典，或 None（调用失败时）
+    """
+    api_key = config.get("ark_api_key", "") or os.environ.get("ARK_API_KEY", "")
+    endpoint_id = config.get("ark_endpoint_id", "")
+    base_url = config.get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+    timeout = config.get("timeout", 30)
+    prompt_template = config.get("classification_prompt", "")
+
+    if not api_key:
+        logger.warning("ARK_API_KEY 未配置，无法调用豆包大模型")
+        return None
+    if not endpoint_id:
+        logger.warning("ark_endpoint_id 未配置，无法调用豆包大模型")
+        return None
+    if not prompt_template:
+        logger.warning("AI classification_prompt 未配置，跳过分类")
+        return None
+
+    prompt = prompt_template.replace("{message}", message)
+
+    # ARK 兼容 OpenAI 格式，model 字段填 endpoint_id
+    request_body = json.dumps({
+        "model": endpoint_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+    }).encode("utf-8")
+
+    url = f"{base_url}/chat/completions"
+    req = urllib.request.Request(url, data=request_body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                logger.warning("ARK AI 返回内容为空")
+                return None
+            return parse_ai_response(content)
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        logger.error("ARK API HTTP 错误 %s: %s", e.code, error_body[:300])
+        return None
+    except urllib.error.URLError as e:
+        logger.error("ARK API 网络错误: %s", e.reason)
+        return None
+    except Exception as e:
+        logger.error("ARK AI 分类异常: %s", e)
+        return None
+
+
+def call_lark_ai(message: str, config: dict[str, Any]) -> dict | None:
     """
     通过 lark-cli api 调用飞书内置 AI 进行消息分类。
 
@@ -209,6 +279,25 @@ def call_feishu_ai(message: str, config: dict[str, Any]) -> dict | None:
     except Exception as e:
         logger.error("AI 分类异常: %s", e)
         return None
+
+
+def call_ai(message: str, config: dict[str, Any]) -> dict | None:
+    """
+    统一 AI 调用入口，根据配置自动选择 provider。
+
+    Args:
+        message: 待分类的消息文本
+        config: AI 配置段
+
+    Returns:
+        解析后的分类结果字典，或 None
+    """
+    provider = config.get("provider", "lark")
+
+    if provider == "ark":
+        return call_ark_ai(message, config)
+    else:
+        return call_lark_ai(message, config)
 
 
 def parse_ai_response(content: str) -> dict | None:
@@ -822,7 +911,7 @@ class MessageHandler:
         # 5. AI 分类
         priority_info: dict[str, str] = {}
         if self.ai_config.get("enabled", True) and text:
-            ai_result = call_feishu_ai(text, self.ai_config)
+            ai_result = call_ai(text, self.ai_config)
             if ai_result:
                 priority = ai_result.get("priority", "P3")
                 priority_info = {
