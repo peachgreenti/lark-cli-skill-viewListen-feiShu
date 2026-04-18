@@ -340,14 +340,20 @@ def build_weekly_prompt(
     calendar_events: dict | list,
     tasks: dict | list,
     config: dict,
+    template_path: str | None = None,
 ) -> str:
     """将日历事件和任务数据提取为结构化信息，组装为 Prompt。"""
     calendar_info = extract_calendar_info(calendar_events)
     tasks_info = extract_tasks_info(tasks)
 
-    # 优先使用自定义 Prompt 模板
-    custom_prompt = get_config_value(config, "report.custom_prompt", "")
-    template = custom_prompt.strip() if custom_prompt else BUILTIN_PROMPT_TEMPLATE
+    # 优先级：命令行 --template > 配置文件 custom_prompt > 内置模板
+    if template_path and os.path.exists(template_path):
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = f.read().strip()
+        print(f"📝 已加载自定义模板: {template_path}")
+    else:
+        custom_prompt = get_config_value(config, "report.custom_prompt", "")
+        template = custom_prompt.strip() if custom_prompt else BUILTIN_PROMPT_TEMPLATE
 
     return template.format(
         start_date=start_date,
@@ -447,24 +453,26 @@ def create_feishu_doc(title: str, content: str, mode: str = "file") -> str:
 # 消息推送
 # ============================================================
 
-def send_to_chat(text: str, config: dict) -> str | None:
-    """将周报推送到飞书群聊或用户。"""
-    chat_id = get_config_value(config, "notify.chat_id", "")
-    user_id = get_config_value(config, "notify.user_id", "")
+def send_to_chat(text: str, config: dict, send_to: str | None = None) -> str | None:
+    """将周报推送到飞书群聊或用户。send_to 可覆盖配置文件中的目标。"""
+    # 优先使用命令行 --send-to
+    target = send_to or get_config_value(config, "notify.chat_id", "") or get_config_value(config, "notify.user_id", "")
     send_as = get_config_value(config, "notify.send_as", "user")
 
-    if not chat_id and not user_id:
+    if not target:
         return None
 
-    print(f"💬 正在发送周报到飞书...")
+    print(f"💬 正在发送周报到飞书 ({target[:8]}...)...")
 
-    # 构建消息命令
+    # 自动判断目标类型
     command = ["lark-cli", "im", "+messages-send", "--as", send_as]
-
-    if chat_id:
-        command += ["--chat-id", chat_id]
-    elif user_id:
-        command += ["--user-id", user_id]
+    if target.startswith("oc_"):
+        command += ["--chat-id", target]
+    elif target.startswith("ou_"):
+        command += ["--user-id", target]
+    else:
+        # 默认当作 chat_id
+        command += ["--chat-id", target]
 
     command += ["--text", text]
 
@@ -483,6 +491,9 @@ def main():
     parser.add_argument("--no-ai", action="store_true", help="仅获取数据，不调用 AI 生成周报")
     parser.add_argument("--no-doc", action="store_true", help="不自动创建飞书文档")
     parser.add_argument("--no-notify", action="store_true", help="不发送消息到群聊")
+    parser.add_argument("--dry-run", action="store_true", help="预览模式：仅获取和过滤数据，不调用 AI/创建文档/推送")
+    parser.add_argument("--send-to", default=None, help="指定推送目标（群聊 ID 如 oc_xxx 或用户 ID 如 ou_xxx），覆盖配置文件")
+    parser.add_argument("--template", default=None, help="自定义 Prompt 模板文件路径（Markdown 格式，支持占位符）")
     parser.add_argument("--config", default=None, help="指定配置文件路径（默认: ./config.json）")
     parser.add_argument("--docs-mode", choices=["arg", "file", "stdin"], default=None, help="文档内容传入模式")
     args = parser.parse_args()
@@ -490,6 +501,13 @@ def main():
     # 加载配置
     config = load_config(args.config)
     docs_mode = args.docs_mode or get_config_value(config, "docs.mode", "file")
+
+    # dry-run 模式：隐含 --no-ai --no-doc --no-notify
+    if args.dry_run:
+        args.no_ai = True
+        args.no_doc = True
+        args.no_notify = True
+        print("🔍 预览模式（dry-run）：仅获取和过滤数据\n")
 
     # 1. 计算本周日期范围
     start_date, end_date = get_this_week_range()
@@ -505,10 +523,22 @@ def main():
     calendar_events = filter_calendar_events(calendar_events, config)
     tasks = filter_tasks(tasks, config)
 
-    # 5. 构建 Prompt 并调用 AI 生成周报
+    # 5. dry-run: 输出过滤后的数据摘要并退出
+    if args.dry_run:
+        print("\n" + "=" * 60)
+        print("📊 数据预览（dry-run）")
+        print("=" * 60)
+        calendar_info = extract_calendar_info(calendar_events)
+        tasks_info = extract_tasks_info(tasks)
+        print(f"\n📅 日历事件:\n{calendar_info}")
+        print(f"\n✅ 任务列表:\n{tasks_info}")
+        print(f"\n💡 完整运行命令: python3 {os.path.basename(__file__)}")
+        return
+
+    # 6. 构建 Prompt 并调用 AI 生成周报
     weekly_report = None
     if not args.no_ai:
-        prompt = build_weekly_prompt(start_date, end_date, calendar_events, tasks, config)
+        prompt = build_weekly_prompt(start_date, end_date, calendar_events, tasks, config, template_path=args.template)
         weekly_report = call_ai(prompt, config)
 
     # 6. 自动创建飞书文档
@@ -529,7 +559,7 @@ def main():
             f"📋 {title_pattern.format(start=start_date, end=end_date)}\n\n"
             f"{weekly_report}"
         )
-        notify_result = send_to_chat(notify_text, config)
+        notify_result = send_to_chat(notify_text, config, send_to=args.send_to)
 
     # 8. 组装最终输出
     output = {
